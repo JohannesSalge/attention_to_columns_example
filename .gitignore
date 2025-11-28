@@ -1,0 +1,5 @@
+# Spyder project files
+.spyproject/
+__pycache__/
+*.pyc
+.env/
