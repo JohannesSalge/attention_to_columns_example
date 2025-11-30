@@ -163,7 +163,7 @@ class HoT_attention(nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
         
-    def forward(self, x):
+    def forward(self, x):                                   # !!!!! The there is nearly no contrast in the learned weights
         return torch.softmax(self.layers(x), dim=-1)
         #return self.layers(x)
 
@@ -179,7 +179,7 @@ model_HoT = HoT_attention()
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model_classifier.parameters(), lr=0.001)
 
-for epoch in range(150):   # ← 
+for epoch in range(150):   # 
     total_loss = 0
 
     for batch_x, batch_y in loader:
@@ -257,7 +257,7 @@ def train_hot_step(classifier, hot, optimizer_hot, x, target):
 
 
 # Step 4: uncertainty signal
-    correct_class_conf = (probs * target).sum()    # scalar
+    correct_class_conf = (probs * target).sum()    #
 
 
 # Reward 
@@ -317,21 +317,120 @@ for i, (x, y) in enumerate(loader_hot):
 # here I have the problem that the HoT unit received the target on training
 # rethink the HoT-architechture! Is there some kind of bootstrapping for this?
 
+# The Problem: HoT unit has 10 inputs (5 classifier-guess outputs, 5 correct categories)
+#   1) Target vector could be replaced by the classifier output; 
+#   2) Target vector of constants; 
+#   3) Target vector could iteratively be changed and the best option could be chosen
+
+# === Iteratively change input (target) vector
+
+target_matrix = torch.tensor(np.diag(np.ones(5)), dtype = torch.float32)
+
+def autonomous_attention(classifier, hot, x, target_matrix): 
+    #classifier = model_classifier
+    
+    confidence_auton = np.empty(len(target_matrix[1, :]))
+    neg_entropy = np.empty(len(target_matrix[1, :]))
+    margin = np.empty(len(target_matrix[1, :]))
+    
+    
+    # Save intial classifier weights and outputs
+    orig_weights = classifier.column_weights.clone()
+    logits_initial = classifier(x)
+    probs_initial = torch.softmax(logits_initial, dim=-1)
+    
+    #initial_guess = classifier(x)
+    
+    for ii in range(len(target_matrix[1, :])):              # this mental Operation could be put in own function,
+        target = target_matrix[ii, :]
+        target = target.unsqueeze(0)
+        
+        
+        #logits_guess = classifier(x)
+        #probs_guess = torch.softmax(logits_guess, dim=-1)
+        
+        
+        hot_input = torch.cat([probs_initial, target], dim=-1)
+        predicted_weights = hot(hot_input)
+        
+        
+        with torch.no_grad():
+            classifier.column_weights[:] = predicted_weights[0] 
+            
+        logits_after = classifier(x)
+        probs_after = torch.softmax(logits_after, dim=-1)
+        
+        
+        # Decision Criteria 
+        confidence_auton[ii] = (probs_after * target).sum()   # 1) probability of the chosen category
+        
+        entropy = - (probs_after * probs_after.log()).sum()
+        neg_entropy[ii] = -entropy                      # 2) negative entropy
+        
+        probs_after = probs_after.view(-1)
+        sorted_probs, _ = probs_after.sort(descending=True)
+        margin[ii] = sorted_probs[0] - sorted_probs[1]  # 3) probability contrast 
+        
+    # Choose Percept
+    idx_percept = np.array(confidence_auton).argmax()
+    
+    classifier.column_weights[:] = orig_weights # this is not needed 
+    
+    target = target_matrix[idx_percept, :].unsqueeze(0)
+    
+    hot_input = torch.cat([probs_initial, target], dim=-1) # 
+   
+    predicted_weights = hot(hot_input)
+    
+    classifier.column_weights[:] = predicted_weights[0] 
+    #print("weights:", classifier.column_weights) 
+    with open("column_weights.log", "a") as f:
+        f.write(f"Weight: {classifier.column_weights.tolist()}\n")
+    
+    logits = classifier(x)
+    percept = torch.argmax(logits, dim=1)
+    
+    return [percept, logits]
 
 
 
+# Test perfomrance 
+y = torch.tensor(y_np, dtype=torch.long) #!!!! where does "y" get lost?
+correct_baseline = 0
+correct_auton = 0
+probs_after = 0
+
+model_baseline = model_classifier
+model_baseline.column_weights = torch.ones(4)
+
+for ii in range(len(X[:,1])): 
+    
+#for ii in range(1,500):
+    x_in = X[ii, :].reshape(-1, 4, 5)
+
+    percept, logits_hot = autonomous_attention(
+        classifier = model_classifier,
+        hot = hot,
+        x = x_in, 
+        target_matrix = target_matrix
+    )
+    #print("hot-logits:", logits_hot)
+    correct_cat = y[ii]
+    correct_auton += (percept == correct_cat).sum().item()
+    
+    
+    model_baseline.column_weights = torch.ones(4)
+    logits = model_baseline(x_in)
+    #print("ori_logits:", logits)
+    preds = torch.argmax(logits, dim=1)
+    correct_baseline += (preds == correct_cat).sum().item()
+    
+print("Correct Baseline:", correct_baseline)
+print("Correct Autonomous Attention:", correct_auton)
 
 
 
-
-
-
-
-
-
-
-
-
+    
 
 #%% === Thoughts === 
 
@@ -340,6 +439,16 @@ for i, (x, y) in enumerate(loader_hot):
 # commonly presented with, the HoT module could be trained in offline-mode
 # (without external stimuli). 1) Take real stimuli in 2) save representation
 # 3) use representation to further train attention-allocation.
-# 
+
+# Attention might only be needed for difficult cases, that is when unceertainty
+# is high. Therefor certainty (e.g. probability contrast) could be checked 
+# after classification by the classifier. Only when certainty is below threshold
+# the HoT unit could be activatet to increase certainty. 
+
+# In autonomous mode the HoT unit only tries to boost certainty once - however 
+# in a continous perception loop it could test if the boost was strong eneugh 
+# for a stable percept to arise or if uncertainty is still above threshold. If 
+# so it could initiate gathering of further evidence. New evidence could be 
+# modeled by feeding new inputs to the classifier. 
     
 
